@@ -85,6 +85,10 @@ namespace VigemStickDriftUi
         private bool wheelDisengageEnabled = true;
         private DateTime? disengagedUntilUtc;
 
+        private const int WeaponSlotCount = 5;
+        private ComboBox[] _weaponPatternBoxes;
+        private int _currentWeaponSlot;
+
         private sealed class BindingControlSet
         {
             public ComboBox KeySelector { get; set; }
@@ -201,15 +205,18 @@ namespace VigemStickDriftUi
             disengageLayout.Controls.Add(disableKeysList, 0, 2);
             disengageBox.Controls.Add(disengageLayout);
 
-            var contentLayout = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(18), ColumnCount = 3, RowCount = 2 };
+            var contentLayout = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(18), ColumnCount = 3, RowCount = 3 };
             contentLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 250)); contentLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 340)); contentLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-            contentLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 54)); contentLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 46));
+            contentLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 46)); contentLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 38)); contentLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 82));
 
-            contentLayout.Controls.Add(driftBox, 0, 0); contentLayout.SetRowSpan(driftBox, 2);
+            contentLayout.Controls.Add(driftBox, 0, 0); contentLayout.SetRowSpan(driftBox, 3);
             contentLayout.Controls.Add(jitterBox, 1, 0);
             contentLayout.Controls.Add(customPatternBox, 2, 0);
             contentLayout.Controls.Add(disengageBox, 1, 1);
             contentLayout.Controls.Add(BuildBindingBox(), 2, 1);
+            var weaponBox = BuildWeaponSlotsBox();
+            contentLayout.Controls.Add(weaponBox, 1, 2);
+            contentLayout.SetColumnSpan(weaponBox, 2);
 
             updateTimer = new System.Windows.Forms.Timer { Interval = 10 };
             updateTimer.Tick += UpdateTimer_Tick;
@@ -361,7 +368,15 @@ namespace VigemStickDriftUi
                 string keyName = NormalizeKeyName(e.Key);
                 inputBindingManager.SetKeyState(keyName, e.IsDown);
 
-                if (e.IsDown && IsDisableKeySelected(e.Key)) EngageTemporaryDisengage($"key {keyName}");
+                // Never disengage when the pressed key is the configured jitter trigger —
+                // that would fight the jitter activation on every hold.
+                string jitterKey = jitterHoldKeyBox.SelectedItem?.ToString() ?? "None";
+                bool isJitterTrigger = string.Equals(keyName, jitterKey, StringComparison.OrdinalIgnoreCase);
+
+                if (e.IsDown && !isJitterTrigger && IsDisableKeySelected(e.Key))
+                    EngageTemporaryDisengage($"key {keyName}");
+
+                if (e.IsDown) CheckWeaponSlotKey(e.Key);
                 CheckJitterBindTrigger(keyName, e.IsDown);
             };
             inputHook.Start();
@@ -503,7 +518,24 @@ namespace VigemStickDriftUi
         private static string[] GetKeyChoices() => new[] { "None", "Shift", "Ctrl", "Space", "Tab", "Enter", "A", "B", "C", "X", "Y", "Z" };
 
         private void LoadProfileList() { profileComboBox.Items.Clear(); if (Directory.Exists(profilesDirectory)) profileComboBox.Items.AddRange(Directory.GetFiles(profilesDirectory, "*.json").Select(Path.GetFileNameWithoutExtension).ToArray()); }
-        private void LoadPatternList() { patternComboBox.Items.Clear(); if (Directory.Exists(patternsDirectory)) patternComboBox.Items.AddRange(Directory.GetFiles(patternsDirectory, "*.txt").Select(Path.GetFileNameWithoutExtension).ToArray()); }
+        private void LoadPatternList()
+        {
+            string[] files = Directory.Exists(patternsDirectory)
+                ? Directory.GetFiles(patternsDirectory, "*.txt").Select(Path.GetFileNameWithoutExtension).ToArray()
+                : Array.Empty<string>();
+            patternComboBox.Items.Clear();
+            patternComboBox.Items.AddRange(files);
+            if (_weaponPatternBoxes == null) return;
+            foreach (var combo in _weaponPatternBoxes)
+            {
+                string selected = combo.SelectedItem?.ToString();
+                combo.Items.Clear();
+                combo.Items.Add("(none)");
+                foreach (string f in files) combo.Items.Add(f);
+                combo.SelectedItem = selected;
+                if (combo.SelectedIndex < 0) combo.SelectedIndex = 0;
+            }
+        }
 
         private void SaveProfileButton_Click(object sender, EventArgs e)
         {
@@ -558,8 +590,16 @@ namespace VigemStickDriftUi
         {
             string p = Path.Combine(patternsDirectory, patternComboBox.Text + ".txt");
             if (!File.Exists(p)) return;
+            LoadPatternFromFile(p);
+        }
+
+        // Shared pattern loading — used by the manual Load button and weapon-slot auto-switch.
+        // Populates customPatternPoints from a .txt file and switches the pattern type to Custom
+        // so the JitterEngine actually reads the loaded points on its next tick.
+        private void LoadPatternFromFile(string filePath)
+        {
             customPatternPoints.Clear();
-            foreach (var l in File.ReadAllLines(p))
+            foreach (var l in File.ReadAllLines(filePath))
             {
                 var parts = l.Split(',');
                 if (parts.Length >= 2
@@ -570,6 +610,8 @@ namespace VigemStickDriftUi
                     customPatternPoints.Add(new PatternStep { X = x, Y = y, Delay = delay });
                 }
             }
+            // Ensure the engine uses the loaded points rather than the built-in Shake/Circle.
+            jitterPatternBox.SelectedItem = "Custom";
             SyncCustomPatternTextFromPoints();
         }
 
@@ -589,6 +631,57 @@ namespace VigemStickDriftUi
         private void ApplyDefaults() { controllerTypeBox.SelectedItem = "PS4"; jitterPatternBox.SelectedItem = "Shake"; pullDirectionBox.SelectedItem = "Center"; }
         private void AddLabeledNumeric(TableLayoutPanel parent, int r, string t, out NumericUpDown n, int min, int max, int val, int w) { var p = new Panel { Dock = DockStyle.Fill }; n = new NumericUpDown { Left = w + 8, Top = 4, Width = 90, Minimum = min, Maximum = max, Value = val }; p.Controls.AddRange(new Control[] { new Label { Text = t, Width = w, Top = 8 }, n }); parent.Controls.Add(p, 0, r); }
         private void AddLabeledCombo(TableLayoutPanel parent, int r, string t, out ComboBox c, IEnumerable<string> items, int w) { var p = new Panel { Dock = DockStyle.Fill }; c = new ComboBox { Left = w + 8, Top = 4, Width = 130, DropDownStyle = ComboBoxStyle.DropDownList }; foreach (var i in items) c.Items.Add(i); c.SelectedIndex = 0; p.Controls.AddRange(new Control[] { new Label { Text = t, Width = w, Top = 8 }, c }); parent.Controls.Add(p, 0, r); }
+
+        private GroupBox BuildWeaponSlotsBox()
+        {
+            var box = new GroupBox { Dock = DockStyle.Fill, Text = "Weapon Auto-Pattern  (press 1–5 to load)", Padding = new Padding(10, 4, 10, 4) };
+            var flow = new FlowLayoutPanel { Dock = DockStyle.Fill, WrapContents = false, AutoScroll = true };
+            _weaponPatternBoxes = new ComboBox[WeaponSlotCount];
+            for (int i = 0; i < WeaponSlotCount; i++)
+            {
+                flow.Controls.Add(new Label { Text = $"Weapon {i + 1}:", AutoSize = true, Margin = new Padding(6, 8, 4, 0) });
+                var combo = new ComboBox { Width = 130, DropDownStyle = ComboBoxStyle.DropDownList, Margin = new Padding(0, 4, 20, 0) };
+                combo.Items.Add("(none)");
+                combo.SelectedIndex = 0;
+                _weaponPatternBoxes[i] = combo;
+                flow.Controls.Add(combo);
+            }
+            box.Controls.Add(flow);
+            return box;
+        }
+
+        // Called from the global key hook whenever a key-down fires.
+        // Keys 1–5 (top-row or numpad) select the corresponding weapon slot and
+        // load the mapped pattern file so jitter immediately uses it.
+        private void CheckWeaponSlotKey(Keys key)
+        {
+            int slot = key switch
+            {
+                Keys.D1 or Keys.NumPad1 => 1,
+                Keys.D2 or Keys.NumPad2 => 2,
+                Keys.D3 or Keys.NumPad3 => 3,
+                Keys.D4 or Keys.NumPad4 => 4,
+                Keys.D5 or Keys.NumPad5 => 5,
+                _ => 0
+            };
+            if (slot == 0) return;
+            // Key events fire on the UI thread (hook was installed there), but guard anyway.
+            if (InvokeRequired) Invoke(() => ApplyWeaponSlot(slot));
+            else ApplyWeaponSlot(slot);
+        }
+
+        private void ApplyWeaponSlot(int slot)
+        {
+            if (slot < 1 || slot > _weaponPatternBoxes.Length) return;
+            string patternFileName = _weaponPatternBoxes[slot - 1].SelectedItem?.ToString();
+            if (string.IsNullOrEmpty(patternFileName) || patternFileName == "(none)") return;
+            string filePath = Path.Combine(patternsDirectory, patternFileName + ".txt");
+            if (!File.Exists(filePath)) return;
+
+            _currentWeaponSlot = slot;
+            LoadPatternFromFile(filePath);   // sets Custom mode + syncs preview
+            statusLabel.Text = $"Weapon {slot} → {patternFileName}  ({customPatternPoints.Count} steps, Custom mode active)";
+        }
 
         private static string NormalizeKeyName(Keys key) => key switch { Keys.LShiftKey or Keys.RShiftKey or Keys.ShiftKey => "Shift", Keys.LControlKey or Keys.RControlKey or Keys.ControlKey => "Ctrl", Keys.LMenu or Keys.RMenu or Keys.Menu => "Alt", Keys.Space => "Space", Keys.Return => "Enter", Keys.Escape => "Escape", _ => key.ToString() };
         private void MainForm_FormClosing(object sender, FormClosingEventArgs e) { try { inputHook?.Dispose(); } catch { } CleanupController(); }
