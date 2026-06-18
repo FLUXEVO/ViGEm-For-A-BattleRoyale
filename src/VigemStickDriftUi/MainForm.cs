@@ -86,6 +86,7 @@ namespace VigemStickDriftUi
         private DateTime? disengagedUntilUtc;
 
         private const int WeaponSlotCount = 5;
+        private ComboBox[] _weaponKeyBoxes;
         private ComboBox[] _weaponPatternBoxes;
         private int _currentWeaponSlot;
 
@@ -134,7 +135,7 @@ namespace VigemStickDriftUi
             var headerFlow = new FlowLayoutPanel { Dock = DockStyle.Top, Height = 44, Padding = new Padding(18, 12, 18, 0), WrapContents = false };
             headerFlow.Controls.AddRange(new Control[] { titleLabel, controllerTypeBox, connectButton, disconnectButton, new Label { AutoSize = true, Text = "Profile", Margin = new Padding(0, 6, 8, 0) }, profileComboBox, saveProfileButton, loadProfileButton, deleteProfileButton });
 
-            valueLabel = new Label { Dock = DockStyle.Top, Height = 24, Padding = new Padding(20, 0, 20, 0), Text = "Base downward drift: 0%" };
+            valueLabel = new Label { Dock = DockStyle.Top, Height = 24, Padding = new Padding(20, 0, 20, 0), Text = "Upward drift: 0%" };
             statusLabel = new Label { Dock = DockStyle.Top, Height = 24, Padding = new Padding(20, 0, 20, 0), Text = "Status: Not connected" };
             hintLabel = new Label { Dock = DockStyle.Top, Height = 44, Padding = new Padding(20, 0, 20, 0), Text = "Clean Refactored Architecture separating UI logic from underlying systems." };
 
@@ -145,9 +146,9 @@ namespace VigemStickDriftUi
             resetButton = new Button { Dock = DockStyle.Fill, Text = "Reset" }; resetButton.Click += ResetButton_Click;
 
             driftLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 24)); driftLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100)); driftLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 24)); driftLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 38)); driftLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 34)); driftLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 34)); driftLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
-            driftLayout.Controls.Add(new Label { Dock = DockStyle.Fill, Text = "Centered / neutral", TextAlign = ContentAlignment.MiddleCenter }, 0, 0);
+            driftLayout.Controls.Add(new Label { Dock = DockStyle.Fill, Text = "No drift / neutral", TextAlign = ContentAlignment.MiddleCenter }, 0, 0);
             driftLayout.Controls.Add(driftSlider, 0, 1);
-            driftLayout.Controls.Add(new Label { Dock = DockStyle.Fill, Text = "More downward drift", TextAlign = ContentAlignment.MiddleCenter }, 0, 2);
+            driftLayout.Controls.Add(new Label { Dock = DockStyle.Fill, Text = "Maximum upward drift", TextAlign = ContentAlignment.MiddleCenter }, 0, 2);
             driftLayout.Controls.Add(resetButton, 0, 3);
             AddLabeledCombo(driftLayout, 4, "Jitter trigger", out jitterHoldKeyBox, GetJitterTriggerChoices(), 95);
             AddLabeledNumeric(driftLayout, 5, "Extra drift on hold %", out holdExtraDriftBox, 0, 35, 8, 140);
@@ -303,9 +304,11 @@ namespace VigemStickDriftUi
                 return;
             }
 
-            // Read inputs & calculate standard base pull
-            int baseDriftY = driftSlider.Value;
-            int baseDriftX = GetBasePullDirectionX(baseDriftY);
+            // driftSlider = 0% → Y=50 (centered, no drift); 100% → Y=0 (full upward drift).
+            // The ControllerManager convention is Y=0=up, Y=50=center, Y=100=down.
+            int driftPercent = driftSlider.Value;
+            int baseDriftY = 50 - driftPercent / 2;
+            int baseDriftX = GetBasePullDirectionX(driftPercent);
 
             // Forward state to JitterEngine to let it compute offsets and timings
             string selectedPattern = jitterPatternBox.SelectedItem?.ToString() ?? "Off";
@@ -401,11 +404,11 @@ namespace VigemStickDriftUi
             controllerManager.SendNeutralStick();
         }
 
-        private int GetBasePullDirectionX(int basePercentY)
+        private int GetBasePullDirectionX(int driftPercent)
         {
             string direction = pullDirectionBox.SelectedItem?.ToString() ?? "Center";
-            if (string.Equals(direction, "Left", StringComparison.OrdinalIgnoreCase)) return Math.Clamp(50 - (basePercentY / 2), 0, 100);
-            if (string.Equals(direction, "Right", StringComparison.OrdinalIgnoreCase)) return Math.Clamp(50 + (basePercentY / 2), 0, 100);
+            if (string.Equals(direction, "Left", StringComparison.OrdinalIgnoreCase)) return Math.Clamp(50 - (driftPercent / 2), 0, 100);
+            if (string.Equals(direction, "Right", StringComparison.OrdinalIgnoreCase)) return Math.Clamp(50 + (driftPercent / 2), 0, 100);
             return 50;
         }
 
@@ -426,8 +429,8 @@ namespace VigemStickDriftUi
             statusLabel.Text = "Status: Not connected";
         }
 
-        private void DriftSlider_Scroll(object sender, EventArgs e) => valueLabel.Text = $"Base downward drift: {driftSlider.Value}%";
-        private void ResetButton_Click(object sender, EventArgs e) { driftSlider.Value = 0; valueLabel.Text = "Base downward drift: 0%"; }
+        private void DriftSlider_Scroll(object sender, EventArgs e) => valueLabel.Text = $"Upward drift: {driftSlider.Value}%";
+        private void ResetButton_Click(object sender, EventArgs e) { driftSlider.Value = 0; valueLabel.Text = "Upward drift: 0%"; }
         private void WheelDisengageToggleButton_Click(object sender, EventArgs e) { wheelDisengageEnabled = !wheelDisengageEnabled; wheelDisengageToggleButton.Text = wheelDisengageEnabled ? "Wheel disengage: ON" : "Wheel disengage: OFF"; }
 
         private void PatternPreviewPanel_Paint(object sender, PaintEventArgs e)
@@ -634,53 +637,97 @@ namespace VigemStickDriftUi
 
         private GroupBox BuildWeaponSlotsBox()
         {
-            var box = new GroupBox { Dock = DockStyle.Fill, Text = "Weapon Auto-Pattern  (press 1–5 to load)", Padding = new Padding(10, 4, 10, 4) };
+            var box = new GroupBox { Dock = DockStyle.Fill, Text = "Weapon Slots — configure key + pattern, then press that key in-game", Padding = new Padding(10, 4, 10, 4) };
             var flow = new FlowLayoutPanel { Dock = DockStyle.Fill, WrapContents = false, AutoScroll = true };
+
+            // Header labels
+            flow.Controls.Add(new Label { Text = "Slot", AutoSize = true, Font = new Font(Font.FontFamily, 7.5f, FontStyle.Bold), Margin = new Padding(6, 10, 30, 0) });
+            flow.Controls.Add(new Label { Text = "Key", AutoSize = true, Font = new Font(Font.FontFamily, 7.5f, FontStyle.Bold), Margin = new Padding(0, 10, 68, 0) });
+            flow.Controls.Add(new Label { Text = "Pattern file  (none = holster, disables jitter)", AutoSize = true, Font = new Font(Font.FontFamily, 7.5f, FontStyle.Bold), Margin = new Padding(0, 10, 0, 0) });
+
+            _weaponKeyBoxes = new ComboBox[WeaponSlotCount];
             _weaponPatternBoxes = new ComboBox[WeaponSlotCount];
+            string[] keyChoices = { "(none)", "1", "2", "3", "4", "5", "6", "7", "8", "9" };
+            string[] defaultKeys = { "1", "2", "3", "4", "5" };
+
             for (int i = 0; i < WeaponSlotCount; i++)
             {
-                flow.Controls.Add(new Label { Text = $"Weapon {i + 1}:", AutoSize = true, Margin = new Padding(6, 8, 4, 0) });
-                var combo = new ComboBox { Width = 130, DropDownStyle = ComboBoxStyle.DropDownList, Margin = new Padding(0, 4, 20, 0) };
-                combo.Items.Add("(none)");
-                combo.SelectedIndex = 0;
-                _weaponPatternBoxes[i] = combo;
-                flow.Controls.Add(combo);
+                flow.Controls.Add(new Label { Text = $"Slot {i + 1}", AutoSize = true, Margin = new Padding(6, 8, 12, 0) });
+
+                var keyCombo = new ComboBox { Width = 58, DropDownStyle = ComboBoxStyle.DropDownList, Margin = new Padding(0, 4, 12, 0) };
+                foreach (string k in keyChoices) keyCombo.Items.Add(k);
+                keyCombo.SelectedItem = i < defaultKeys.Length ? defaultKeys[i] : "(none)";
+                _weaponKeyBoxes[i] = keyCombo;
+                flow.Controls.Add(keyCombo);
+
+                var patternCombo = new ComboBox { Width = 150, DropDownStyle = ComboBoxStyle.DropDownList, Margin = new Padding(0, 4, 28, 0) };
+                patternCombo.Items.Add("(none)");
+                patternCombo.SelectedIndex = 0;
+                _weaponPatternBoxes[i] = patternCombo;
+                flow.Controls.Add(patternCombo);
             }
+
             box.Controls.Add(flow);
             return box;
         }
 
-        // Called from the global key hook whenever a key-down fires.
-        // Keys 1–5 (top-row or numpad) select the corresponding weapon slot and
-        // load the mapped pattern file so jitter immediately uses it.
+        // Called on every key-down. Converts the raw key to its number string ("1"–"9")
+        // then scans all slots to find which one has that key configured.
         private void CheckWeaponSlotKey(Keys key)
         {
-            int slot = key switch
+            string pressedStr = key switch
             {
-                Keys.D1 or Keys.NumPad1 => 1,
-                Keys.D2 or Keys.NumPad2 => 2,
-                Keys.D3 or Keys.NumPad3 => 3,
-                Keys.D4 or Keys.NumPad4 => 4,
-                Keys.D5 or Keys.NumPad5 => 5,
-                _ => 0
+                Keys.D1 or Keys.NumPad1 => "1",
+                Keys.D2 or Keys.NumPad2 => "2",
+                Keys.D3 or Keys.NumPad3 => "3",
+                Keys.D4 or Keys.NumPad4 => "4",
+                Keys.D5 or Keys.NumPad5 => "5",
+                Keys.D6 or Keys.NumPad6 => "6",
+                Keys.D7 or Keys.NumPad7 => "7",
+                Keys.D8 or Keys.NumPad8 => "8",
+                Keys.D9 or Keys.NumPad9 => "9",
+                _ => null
             };
-            if (slot == 0) return;
-            // Key events fire on the UI thread (hook was installed there), but guard anyway.
-            if (InvokeRequired) Invoke(() => ApplyWeaponSlot(slot));
-            else ApplyWeaponSlot(slot);
+            if (pressedStr == null) return;
+            if (InvokeRequired) Invoke(() => MatchAndApplyWeaponSlot(pressedStr));
+            else MatchAndApplyWeaponSlot(pressedStr);
+        }
+
+        private void MatchAndApplyWeaponSlot(string pressedStr)
+        {
+            for (int i = 0; i < _weaponKeyBoxes.Length; i++)
+            {
+                if (string.Equals(_weaponKeyBoxes[i].SelectedItem?.ToString(), pressedStr, StringComparison.Ordinal))
+                {
+                    ApplyWeaponSlot(i + 1);
+                    return;
+                }
+            }
         }
 
         private void ApplyWeaponSlot(int slot)
         {
             if (slot < 1 || slot > _weaponPatternBoxes.Length) return;
-            string patternFileName = _weaponPatternBoxes[slot - 1].SelectedItem?.ToString();
-            if (string.IsNullOrEmpty(patternFileName) || patternFileName == "(none)") return;
-            string filePath = Path.Combine(patternsDirectory, patternFileName + ".txt");
-            if (!File.Exists(filePath)) return;
-
             _currentWeaponSlot = slot;
-            LoadPatternFromFile(filePath);   // sets Custom mode + syncs preview
-            statusLabel.Text = $"Weapon {slot} → {patternFileName}  ({customPatternPoints.Count} steps, Custom mode active)";
+            string patternFileName = _weaponPatternBoxes[slot - 1].SelectedItem?.ToString();
+
+            // "(none)" means holster — turn off jitter entirely
+            if (string.IsNullOrEmpty(patternFileName) || patternFileName == "(none)")
+            {
+                jitterPatternBox.SelectedItem = "Off";
+                statusLabel.Text = $"Slot {slot} selected: holster — jitter disabled";
+                return;
+            }
+
+            string filePath = Path.Combine(patternsDirectory, patternFileName + ".txt");
+            if (!File.Exists(filePath))
+            {
+                statusLabel.Text = $"Slot {slot}: file not found — {patternFileName}.txt";
+                return;
+            }
+
+            LoadPatternFromFile(filePath);   // loads points + sets jitterPatternBox to "Custom"
+            statusLabel.Text = $"Slot {slot} ({patternFileName}) loaded — {customPatternPoints.Count} steps";
         }
 
         private static string NormalizeKeyName(Keys key) => key switch { Keys.LShiftKey or Keys.RShiftKey or Keys.ShiftKey => "Shift", Keys.LControlKey or Keys.RControlKey or Keys.ControlKey => "Ctrl", Keys.LMenu or Keys.RMenu or Keys.Menu => "Alt", Keys.Space => "Space", Keys.Return => "Enter", Keys.Escape => "Escape", _ => key.ToString() };
