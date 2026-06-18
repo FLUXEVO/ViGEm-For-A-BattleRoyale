@@ -84,6 +84,14 @@ namespace VigemStickDriftUi
         private bool wheelDisengageEnabled = true;
         private DateTime? disengagedUntilUtc;
 
+        // Toggle-based per-key disable (independent of the timer-based wheel disengage)
+        private readonly HashSet<string> _persistentDisableKeys = new();
+        private readonly HashSet<string> _disableKeyPhysicallyHeld = new();  // repeat guard
+
+        // ESC long-press tracking
+        private DateTime? _escDownAt;
+        private const int EscLongPressMs = 800;
+
         private const int WeaponSlotCount = 10;          // keys 1-9 and 0
         private ComboBox[] _weaponKeyBoxes;
         private ComboBox[] _weaponPatternBoxes;
@@ -230,8 +238,17 @@ namespace VigemStickDriftUi
 
         private GroupBox BuildBindingBox()
         {
-            var bindingBox = new GroupBox { Dock = DockStyle.Fill, Text = "PC key -> controller" };
-            var layout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1 + ((BindingActions.Length + 1) / 2) };
+            var bindingBox = new GroupBox { Dock = DockStyle.Fill, Text = "In-Game Binds" };
+            var scroll = new Panel { Dock = DockStyle.Fill, AutoScroll = true };
+
+            int rowCount = 1 + ((BindingActions.Length + 1) / 2);
+            var layout = new TableLayoutPanel
+            {
+                AutoSize = true,
+                AutoSizeMode = AutoSizeMode.GrowAndShrink,
+                ColumnCount = 2,
+                RowCount = rowCount
+            };
             layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 40));
             layout.Controls.Add(new Label { Text = "Bind keyboard keys to virtual controller buttons.", Dock = DockStyle.Fill }, 0, 0);
             layout.SetColumnSpan(layout.Controls[0], 2);
@@ -241,10 +258,13 @@ namespace VigemStickDriftUi
             {
                 layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 36));
                 layout.Controls.Add(CreateBindingSelector(BindingActions[index]), 0, row);
-                if (index + 1 < BindingActions.Length) layout.Controls.Add(CreateBindingSelector(BindingActions[index + 1]), 1, row);
+                if (index + 1 < BindingActions.Length)
+                    layout.Controls.Add(CreateBindingSelector(BindingActions[index + 1]), 1, row);
                 row++;
             }
-            bindingBox.Controls.Add(layout);
+
+            scroll.Controls.Add(layout);
+            bindingBox.Controls.Add(scroll);
             return bindingBox;
         }
 
@@ -296,10 +316,13 @@ namespace VigemStickDriftUi
 
             if (!controllerManager.IsConnected) return;
 
-            if (isTemporarilyDisengaged)
+            // Timed disengage (mouse wheel) OR toggle-based disable (keys) → send neutral
+            bool persistentlyDisabled = _persistentDisableKeys.Count > 0;
+            if (isTemporarilyDisengaged || persistentlyDisabled)
             {
                 controllerManager.SendNeutralStick();
-                statusLabel.Text = "Status: Temporarily disabled";
+                if (!persistentlyDisabled)   // don't overwrite the key-disable message
+                    statusLabel.Text = "Status: Temporarily disabled (wheel)";
                 updateTimer.Interval = 10;
                 return;
             }
@@ -363,37 +386,102 @@ namespace VigemStickDriftUi
         private void InitializeInputHook()
         {
             inputHook = new GlobalInputHook();
-            inputHook.WheelScrolled += (s, e) => { if (wheelDisengageEnabled) EngageTemporaryDisengage("mouse wheel"); };
+
+            // Wheel up OR down → timed disengage (if enabled and controller is live)
+            inputHook.WheelScrolled += (s, e) =>
+            {
+                if (wheelDisengageEnabled && controllerManager.IsConnected && _persistentDisableKeys.Count == 0)
+                    EngageTemporaryDisengage("mouse wheel");
+            };
+
             inputHook.LeftButtonStateChanged += (s, down) => CheckJitterBindTrigger("Mouse Left", down);
             inputHook.RightButtonStateChanged += (s, down) => CheckJitterBindTrigger("Mouse Right", down);
+
             inputHook.KeyStateChanged += (s, e) =>
             {
                 string keyName = NormalizeKeyName(e.Key);
                 inputBindingManager.SetKeyState(keyName, e.IsDown);
 
-                // ESC toggles the controller connection on/off
-                if (e.Key == Keys.Escape && e.IsDown)
+                // ── ESC: long-press disconnect / next-press reconnect ─────────────────
+                if (e.Key == Keys.Escape)
                 {
-                    if (InvokeRequired) Invoke(ToggleControllerConnection);
-                    else ToggleControllerConnection();
+                    HandleEscapeKey(e.IsDown);
                     return;
                 }
 
-                // Track weapon number key press/release for live status indicators
+                // ── Weapon key press/release tracking (status labels) ─────────────────
                 UpdateWeaponKeyPressedState(e.Key, e.IsDown);
 
-                // Disable keys (Tab, E, F, Q, R, Shift…) cause a timed disengage — but
-                // never when: (a) controller isn't connected, (b) the key is also the jitter trigger.
+                // ── Toggle-based disable keys (Tab, E, F, Q, R, Shift, 4, 5 …) ────────
+                // Each checked key independently toggles the disabled state.
+                // A repeat guard (_disableKeyPhysicallyHeld) means only the leading edge counts.
                 string jitterKey = jitterHoldKeyBox.SelectedItem?.ToString() ?? "None";
                 bool isJitterTrigger = string.Equals(keyName, jitterKey, StringComparison.OrdinalIgnoreCase);
 
-                if (e.IsDown && controllerManager.IsConnected && !isJitterTrigger && IsDisableKeySelected(e.Key))
-                    EngageTemporaryDisengage($"key {keyName}");
+                if (controllerManager.IsConnected && !isJitterTrigger && IsDisableKeySelected(e.Key))
+                {
+                    if (e.IsDown && !_disableKeyPhysicallyHeld.Contains(keyName))
+                    {
+                        _disableKeyPhysicallyHeld.Add(keyName);
+                        if (InvokeRequired) Invoke(() => ToggleDisableKey(keyName));
+                        else ToggleDisableKey(keyName);
+                    }
+                    else if (!e.IsDown)
+                    {
+                        _disableKeyPhysicallyHeld.Remove(keyName);
+                    }
+                }
 
                 if (e.IsDown) CheckWeaponSlotKey(e.Key);
                 CheckJitterBindTrigger(keyName, e.IsDown);
             };
+
             inputHook.Start();
+        }
+
+        // ── ESC: track hold duration; long-press = disconnect, short-press when off = reconnect ──
+        private void HandleEscapeKey(bool isDown)
+        {
+            if (isDown)
+            {
+                _escDownAt ??= DateTime.UtcNow;   // ignore repeats
+            }
+            else
+            {
+                if (!_escDownAt.HasValue) return;
+                double heldMs = (DateTime.UtcNow - _escDownAt.Value).TotalMilliseconds;
+                _escDownAt = null;
+                if (InvokeRequired) Invoke(() => ProcessEscapeRelease(heldMs));
+                else ProcessEscapeRelease(heldMs);
+            }
+        }
+
+        private void ProcessEscapeRelease(double heldMs)
+        {
+            if (controllerManager.IsConnected && heldMs >= EscLongPressMs)
+            {
+                CleanupController();
+                statusLabel.Text = "ESC held: controller disconnected — tap ESC to reconnect";
+            }
+            else if (!controllerManager.IsConnected)
+            {
+                ConnectButton_Click(this, EventArgs.Empty);
+            }
+        }
+
+        // ── Per-key toggle disable ─────────────────────────────────────────────────────
+        private void ToggleDisableKey(string keyName)
+        {
+            if (_persistentDisableKeys.Contains(keyName))
+                _persistentDisableKeys.Remove(keyName);
+            else
+            {
+                _persistentDisableKeys.Add(keyName);
+                if (controllerManager.IsConnected) controllerManager.SendNeutralStick();
+            }
+
+            if (_persistentDisableKeys.Count > 0)
+                statusLabel.Text = $"Disabled by: [{string.Join(", ", _persistentDisableKeys)}] — press same key again to re-enable";
         }
 
         private void CheckJitterBindTrigger(string triggeredInput, bool isDown)
@@ -432,6 +520,9 @@ namespace VigemStickDriftUi
 
             isTemporarilyDisengaged = false;
             disengagedUntilUtc = null;
+            _persistentDisableKeys.Clear();
+            _disableKeyPhysicallyHeld.Clear();
+            _escDownAt = null;
 
             controllerTypeBox.Enabled = true;
             connectButton.Enabled = true;
@@ -446,15 +537,22 @@ namespace VigemStickDriftUi
 
         private void PatternPreviewPanel_Paint(object sender, PaintEventArgs e)
         {
-            Graphics graphics = e.Graphics;
+            Graphics g = e.Graphics;
             Rectangle rect = patternPreviewPanel.ClientRectangle;
-            graphics.DrawLine(Pens.LightGray, 0, rect.Height / 2, rect.Width, rect.Height / 2);
-            graphics.DrawLine(Pens.LightGray, rect.Width / 2, 0, rect.Width / 2, rect.Height);
+
+            // Use a centred square so X and Y axes are the same scale
+            int size = Math.Max(1, Math.Min(rect.Width, rect.Height));
+            int ox = (rect.Width - size) / 2;
+            int oy = (rect.Height - size) / 2;
+
+            g.DrawRectangle(Pens.LightGray, ox, oy, size - 1, size - 1);
+            g.DrawLine(Pens.LightGray, ox, oy + size / 2, ox + size, oy + size / 2);
+            g.DrawLine(Pens.LightGray, ox + size / 2, oy, ox + size / 2, oy + size);
 
             if (customPatternPoints.Count == 0) return;
             Point[] screenPoints = customPatternPoints.Select(ConvertPatternPointToScreen).ToArray();
-            if (screenPoints.Length > 1) graphics.DrawLines(Pens.Blue, screenPoints);
-            foreach (var p in screenPoints) graphics.FillEllipse(Brushes.Red, p.X - 4, p.Y - 4, 8, 8);
+            if (screenPoints.Length > 1) g.DrawLines(Pens.Blue, screenPoints);
+            foreach (var p in screenPoints) g.FillEllipse(Brushes.Red, p.X - 4, p.Y - 4, 8, 8);
         }
 
         private void PatternPreviewPanel_MouseClick(object sender, MouseEventArgs e)
@@ -474,16 +572,22 @@ namespace VigemStickDriftUi
         private Point ConvertPatternPointToScreen(PatternStep step)
         {
             Rectangle rect = patternPreviewPanel.ClientRectangle;
-            int x = (int)Math.Round(((step.X + 100) / 200.0) * rect.Width);
-            int y = (int)Math.Round(((100 - step.Y) / 200.0) * rect.Height);
-            return new Point(Math.Clamp(x, 0, rect.Width), Math.Clamp(y, 0, rect.Height));
+            int size = Math.Max(1, Math.Min(rect.Width, rect.Height));
+            int ox = (rect.Width - size) / 2;
+            int oy = (rect.Height - size) / 2;
+            int x = ox + (int)Math.Round(((step.X + 100) / 200.0) * size);
+            int y = oy + (int)Math.Round(((100 - step.Y) / 200.0) * size);
+            return new Point(Math.Clamp(x, ox, ox + size - 1), Math.Clamp(y, oy, oy + size - 1));
         }
 
         private PatternStep ConvertScreenPointToPattern(Point pt)
         {
             Rectangle rect = patternPreviewPanel.ClientRectangle;
-            int x = (int)Math.Round((pt.X / (double)rect.Width) * 200.0 - 100.0);
-            int y = (int)Math.Round(100.0 - (pt.Y / (double)rect.Height) * 200.0);
+            int size = Math.Max(1, Math.Min(rect.Width, rect.Height));
+            int ox = (rect.Width - size) / 2;
+            int oy = (rect.Height - size) / 2;
+            int x = (int)Math.Round(((pt.X - ox) / (double)size) * 200.0 - 100.0);
+            int y = (int)Math.Round(100.0 - ((pt.Y - oy) / (double)size) * 200.0);
             return new PatternStep { X = Math.Clamp(x, -100, 100), Y = Math.Clamp(y, -100, 100), Delay = 10 };
         }
 
@@ -524,7 +628,7 @@ namespace VigemStickDriftUi
         private void UseCirclePresetButton_Click(object sender, EventArgs e) { customPatternPoints.Clear(); var list = jitterEngine.GetPatternSteps("Circle", 18, null); customPatternPoints.AddRange(list); SyncCustomPatternTextFromPoints(); }
         private void ClearPatternButton_Click(object sender, EventArgs e) { customPatternPoints.Clear(); SyncCustomPatternTextFromPoints(); }
 
-        private void PopulateDisableKeys() { foreach (var k in new[] { "Tab", "E", "F", "Q", "R", "Shift", "Ctrl" }) disableKeysList.Items.Add(k, k == "Tab" || k == "E"); }
+        private void PopulateDisableKeys() { foreach (var k in new[] { "Tab", "E", "F", "Q", "R", "Shift", "Ctrl", "4", "5" }) disableKeysList.Items.Add(k, k == "Tab" || k == "E"); }
         private bool IsDisableKeySelected(Keys key) => disableKeysList.CheckedItems.Cast<object>().Any(i => string.Equals(i.ToString(), NormalizeKeyName(key), StringComparison.OrdinalIgnoreCase));
         private void EnsureProfilesDirectory() => Directory.CreateDirectory(profilesDirectory);
         private void EnsurePatternsDirectory() => Directory.CreateDirectory(patternsDirectory);
@@ -758,8 +862,8 @@ namespace VigemStickDriftUi
 
         private void MatchAndApplyWeaponSlot(string pressedStr)
         {
-            // While disconnected, don't switch patterns — but still allow UI interaction.
-            if (!controllerManager.IsConnected) return;
+            // Don't switch patterns while disconnected or toggle-disabled (UI remains interactive)
+            if (!controllerManager.IsConnected || _persistentDisableKeys.Count > 0) return;
 
             for (int i = 0; i < _weaponKeyBoxes.Length; i++)
             {
@@ -852,20 +956,6 @@ namespace VigemStickDriftUi
             }
         }
 
-        // ESC press: toggle controller on/off so users can pause everything with one key.
-        private void ToggleControllerConnection()
-        {
-            if (controllerManager.IsConnected)
-            {
-                CleanupController();
-                statusLabel.Text = "ESC: controller disconnected — press ESC to reconnect";
-            }
-            else if (connectButton.Enabled)
-            {
-                ConnectButton_Click(this, EventArgs.Empty);
-            }
-        }
-
         // Converts D1-D9/D0 and NumPad equivalents to the string "1"-"9"/"0".
         private static string KeyToNumberString(Keys key) => key switch
         {
@@ -882,7 +972,26 @@ namespace VigemStickDriftUi
             _ => null
         };
 
-        private static string NormalizeKeyName(Keys key) => key switch { Keys.LShiftKey or Keys.RShiftKey or Keys.ShiftKey => "Shift", Keys.LControlKey or Keys.RControlKey or Keys.ControlKey => "Ctrl", Keys.LMenu or Keys.RMenu or Keys.Menu => "Alt", Keys.Space => "Space", Keys.Return => "Enter", Keys.Escape => "Escape", _ => key.ToString() };
+        private static string NormalizeKeyName(Keys key) => key switch
+        {
+            Keys.LShiftKey or Keys.RShiftKey or Keys.ShiftKey => "Shift",
+            Keys.LControlKey or Keys.RControlKey or Keys.ControlKey => "Ctrl",
+            Keys.LMenu or Keys.RMenu or Keys.Menu => "Alt",
+            Keys.Space => "Space",
+            Keys.Return => "Enter",
+            Keys.Escape => "Escape",
+            Keys.D0 or Keys.NumPad0 => "0",
+            Keys.D1 or Keys.NumPad1 => "1",
+            Keys.D2 or Keys.NumPad2 => "2",
+            Keys.D3 or Keys.NumPad3 => "3",
+            Keys.D4 or Keys.NumPad4 => "4",
+            Keys.D5 or Keys.NumPad5 => "5",
+            Keys.D6 or Keys.NumPad6 => "6",
+            Keys.D7 or Keys.NumPad7 => "7",
+            Keys.D8 or Keys.NumPad8 => "8",
+            Keys.D9 or Keys.NumPad9 => "9",
+            _ => key.ToString()
+        };
         private void MainForm_FormClosing(object sender, FormClosingEventArgs e) { try { inputHook?.Dispose(); } catch { } CleanupController(); }
     }
 }
