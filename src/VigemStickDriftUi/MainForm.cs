@@ -554,7 +554,7 @@ namespace VigemStickDriftUi
 
         private void DeleteProfileButton_Click(object sender, EventArgs e) { string p = Path.Combine(profilesDirectory, profileComboBox.Text + ".json"); if (File.Exists(p)) File.Delete(p); LoadProfileList(); }
         private void SavePatternButton_Click(object sender, EventArgs e) { if (customPatternPoints.Count > 0) File.WriteAllLines(Path.Combine(patternsDirectory, patternComboBox.Text + ".txt"), customPatternPoints.Select(pt => $"{pt.X},{pt.Y},{pt.Delay}")); LoadPatternList(); }
-        private void LoadPatternButton_Click(object sender, EventArgs e) { string p = Path.Combine(patternsDirectory, patternComboBox.Text + ".txt"); if (!File.Exists(p)) return; customPatternPoints.Clear(); foreach (var l in File.ReadAllLines(p)) { var parts = l.Split(','); if (parts.Length >= 2 && int.TryParse(parts[0], out int x) && int.TryParse(parts[1], out int y)) customPatternPoints.Add(new PatternStep { X = x, Y = y, Delay = parts.Length >= 3 ? int.Parse(parts[3]) : 10 }); } SyncCustomPatternTextFromPoints(); }
+        private void LoadPatternButton_Click(object sender, EventArgs e) { string p = Path.Combine(patternsDirectory, patternComboBox.Text + ".txt"); if (!File.Exists(p)) return; customPatternPoints.Clear(); foreach (var l in File.ReadAllLines(p)) { var parts = l.Split(','); if (parts.Length >= 2 && int.TryParse(parts[0], out int x) && int.TryParse(parts[1], out int y)) customPatternPoints.Add(new PatternStep { X = x, Y = y, Delay = parts.Length >= 3 ? int.Parse(parts[2]) : 10 }); } SyncCustomPatternTextFromPoints(); }
         private void DeletePatternButton_Click(object sender, EventArgs e) { string p = Path.Combine(patternsDirectory, patternComboBox.Text + ".txt"); if (File.Exists(p)) File.Delete(p); LoadPatternList(); }
 
         private void ApplyDefaults() { controllerTypeBox.SelectedItem = "PS4"; jitterPatternBox.SelectedItem = "Shake"; pullDirectionBox.SelectedItem = "Center"; }
@@ -564,3 +564,4 @@ namespace VigemStickDriftUi
         private static string NormalizeKeyName(Keys key) => key switch { Keys.LShiftKey or Keys.RShiftKey or Keys.ShiftKey => "Shift", Keys.LControlKey or Keys.RControlKey or Keys.ControlKey => "Ctrl", Keys.LMenu or Keys.RMenu or Keys.Menu => "Alt", Keys.Space => "Space", Keys.Return => "Enter", Keys.Escape => "Escape", _ => key.ToString() };
         private void MainForm_FormClosing(object sender, FormClosingEventArgs e) { try { inputHook?.Dispose(); } catch { } CleanupController(); }
     }
+}
