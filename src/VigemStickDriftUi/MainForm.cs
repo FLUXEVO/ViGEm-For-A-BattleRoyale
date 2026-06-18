@@ -78,7 +78,7 @@ namespace VigemStickDriftUi
         private Button savePatternButton;
         private Button loadPatternButton;
         private Button deletePatternButton;
-        private Timer updateTimer;
+        private System.Windows.Forms.Timer updateTimer;
 
         private GlobalInputHook inputHook;
         private bool isTemporarilyDisengaged;
@@ -211,7 +211,7 @@ namespace VigemStickDriftUi
             contentLayout.Controls.Add(disengageBox, 1, 1);
             contentLayout.Controls.Add(BuildBindingBox(), 2, 1);
 
-            updateTimer = new Timer { Interval = 10 };
+            updateTimer = new System.Windows.Forms.Timer { Interval = 10 };
             updateTimer.Tick += UpdateTimer_Tick;
 
             Controls.AddRange(new Control[] { contentLayout, hintLabel, statusLabel, valueLabel, headerFlow });
@@ -564,24 +564,3 @@ namespace VigemStickDriftUi
         private static string NormalizeKeyName(Keys key) => key switch { Keys.LShiftKey or Keys.RShiftKey or Keys.ShiftKey => "Shift", Keys.LControlKey or Keys.RControlKey or Keys.ControlKey => "Ctrl", Keys.LMenu or Keys.RMenu or Keys.Menu => "Alt", Keys.Space => "Space", Keys.Return => "Enter", Keys.Escape => "Escape", _ => key.ToString() };
         private void MainForm_FormClosing(object sender, FormClosingEventArgs e) { try { inputHook?.Dispose(); } catch { } CleanupController(); }
     }
-
-    public class InputProfile
-    {
-        public string Name { get; set; }
-        public string ControllerType { get; set; }
-        public int BaseDriftPercent { get; set; }
-        public string BasePullDirection { get; set; }
-        public int HoldExtraDriftPercent { get; set; }
-        public int JitterDelayMs { get; set; }
-        public int JitterStrengthPercent { get; set; }
-        public int ScrollDisengageMs { get; set; }
-        public bool WheelDisengageEnabled { get; set; }
-        public string JitterHoldKey { get; set; }
-        public string JitterPatternType { get; set; }
-        public string CustomPatternPoints { get; set; }
-        public List<string> DisableKeys { get; set; }
-        public Dictionary<string, string> KeyBindings { get; set; }
-        public Dictionary<string, bool> TurboEnabled { get; set; }
-        public Dictionary<string, int> TurboHz { get; set; }
-    }
-}
