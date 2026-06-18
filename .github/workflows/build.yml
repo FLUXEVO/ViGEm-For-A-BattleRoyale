@@ -2,13 +2,13 @@ name: build
 
 on:
   push:
-    branches: [ "main", "master" ]
+    branches: [ "main", "master", "Test" ]
     paths:
       - "src/**"
       - "*.sln"
 
   pull_request:
-    branches: [ "main", "master" ]
+    branches: [ "main", "master", "Test" ]
     paths:
       - "src/**"
       - "*.sln"
