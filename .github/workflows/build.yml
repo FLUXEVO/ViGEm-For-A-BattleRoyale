@@ -1,102 +1,104 @@
 name: build
 
 on:
-  push:
-    branches: [ "main", "master", "Test" ]
-    paths:
-      - "src/**"
-      - "*.sln"
+push:
+branches: [ "main", "master", "Test" ]
+paths:
+- "src/**"
+- "*.sln"
 
-  pull_request:
-    branches: [ "main", "master", "Test" ]
-    paths:
-      - "src/**"
-      - "*.sln"
+pull_request:
+branches: [ "main", "master", "Test" ]
+paths:
+- "src/**"
+- "*.sln"
 
-  workflow_dispatch:
+workflow_dispatch:
 
 permissions:
-  contents: write
+contents: write
 
 jobs:
-  build:
-    runs-on: windows-latest
+build:
+runs-on: windows-latest
 
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
+```
+steps:
+  - name: Checkout
+    uses: actions/checkout@v4
+    with:
+      fetch-depth: 0
 
-      - name: Setup .NET
-        uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: "8.0.x"
+  - name: Setup .NET
+    uses: actions/setup-dotnet@v4
+    with:
+      dotnet-version: "8.0.x"
 
-      - name: Restore
-        run: dotnet restore .\VigemStickDriftUi.sln
+  - name: Restore
+    run: dotnet restore .\VigemStickDriftUi.sln
 
-      - name: Build
-        run: dotnet build .\VigemStickDriftUi.sln --configuration Release --no-restore
+  - name: Build
+    run: dotnet build .\VigemStickDriftUi.sln --configuration Release --no-restore
 
-      - name: Publish
-        run: dotnet publish .\src\VigemStickDriftUi\VigemStickDriftUi.csproj --configuration Release --runtime win-x64 --self-contained false --output .\artifacts\publish
+  - name: Publish
+    run: dotnet publish .\src\VigemStickDriftUi\VigemStickDriftUi.csproj --configuration Release --runtime win-x64 --self-contained false --output .\artifacts\publish
 
-      - name: Generate release tag
-        if: github.event_name != 'pull_request'
-        id: tag
-        shell: pwsh
-        run: |
-          git fetch --tags
+  - name: Upload artifact
+    uses: actions/upload-artifact@v4
+    with:
+      name: VigemStickDriftUi-win-x64
+      path: .\artifacts\publish\
 
-          $tags = @(git tag --list "v*" | Sort-Object {
-            $t = [string]$_
-            $t = $t.TrimStart('v')
+  - name: Generate release tag
+    if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+    id: tag
+    shell: pwsh
+    run: |
+      git fetch --tags
 
-            if ($t -eq "1") {
-              [version]"1.0"
-            } else {
-              [version]$t
-            }
-          })
+      $tags = @(git tag --list "v*" | Sort-Object {
+        $t = [string]$_
+        $t = $t.TrimStart('v')
 
-          if ($tags.Count -eq 0) {
-            $newTag = "v1"
-          } else {
-            $latest = [string]($tags | Select-Object -Last 1)
-            $ver = $latest -replace '^v', ''
+        if ($t -eq "1") {
+          [version]"1.0"
+        } else {
+          [version]$t
+        }
+      })
 
-            if ($ver -eq "1") {
-              $newTag = "v1.1"
-            } else {
-              $parts = $ver.Split(".")
-              $major = [int]$parts[0]
-              $minor = [int]$parts[1]
-              $minor++
-              $newTag = "v$major.$minor"
-            }
-          }
+      if ($tags.Count -eq 0) {
+        $newTag = "v1"
+      } else {
+        $latest = [string]($tags | Select-Object -Last 1)
+        $ver = $latest -replace '^v', ''
 
-          $zipName = "VigemStickDriftUi-win-x64-$newTag.zip"
+        if ($ver -eq "1") {
+          $newTag = "v1.1"
+        } else {
+          $parts = $ver.Split(".")
+          $major = [int]$parts[0]
+          $minor = [int]$parts[1]
+          $minor++
+          $newTag = "v$major.$minor"
+        }
+      }
 
-          Compress-Archive -Path .\artifacts\publish\* -DestinationPath ".\artifacts\$zipName" -Force
+      $zipName = "VigemStickDriftUi-win-x64-$newTag.zip"
 
-          "tag_name=$newTag" >> $env:GITHUB_OUTPUT
-          "zip_name=$zipName" >> $env:GITHUB_OUTPUT
+      Compress-Archive -Path .\artifacts\publish\* -DestinationPath ".\artifacts\$zipName" -Force
 
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: VigemStickDriftUi-win-x64
-          path: .\artifacts\publish\
+      "tag_name=$newTag" >> $env:GITHUB_OUTPUT
+      "zip_name=$zipName" >> $env:GITHUB_OUTPUT
 
-      - name: Create GitHub Release
-        if: github.event_name != 'pull_request'
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ steps.tag.outputs.tag_name }}
-          name: Release ${{ steps.tag.outputs.tag_name }}
-          generate_release_notes: true
-          files: .\artifacts\${{ steps.tag.outputs.zip_name }}
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  - name: Create GitHub Release
+    if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+    uses: softprops/action-gh-release@v2
+    with:
+      tag_name: ${{ steps.tag.outputs.tag_name }}
+      name: Release ${{ steps.tag.outputs.tag_name }}
+      generate_release_notes: true
+      files: .\artifacts\${{ steps.tag.outputs.zip_name }}
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+```
