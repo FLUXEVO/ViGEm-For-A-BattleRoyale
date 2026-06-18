@@ -40,7 +40,6 @@ namespace VigemStickDriftUi
         private readonly string patternsDirectory = Path.Combine(AppContext.BaseDirectory, "Patterns");
         private readonly Dictionary<string, BindingControlSet> bindingControls = new(StringComparer.OrdinalIgnoreCase);
         private readonly List<PatternStep> customPatternPoints = new();
-        private bool isConnected;
 
         // Core Refactored Managers
         private readonly ControllerManager controllerManager = new();
@@ -85,9 +84,11 @@ namespace VigemStickDriftUi
         private bool wheelDisengageEnabled = true;
         private DateTime? disengagedUntilUtc;
 
-        private const int WeaponSlotCount = 5;
+        private const int WeaponSlotCount = 10;          // keys 1-9 and 0
         private ComboBox[] _weaponKeyBoxes;
         private ComboBox[] _weaponPatternBoxes;
+        private Label[] _keySlotStatusLabels;
+        private readonly HashSet<string> _pressedWeaponKeys = new();
         private int _currentWeaponSlot;
 
         private sealed class BindingControlSet
@@ -112,8 +113,8 @@ namespace VigemStickDriftUi
         {
             Text = "ViGEm Stick Drift UI V8 - Refactored";
             StartPosition = FormStartPosition.CenterScreen;
-            Size = new Size(1280, 860);
-            MinimumSize = new Size(1120, 760);
+            Size = new Size(1280, 940);
+            MinimumSize = new Size(1120, 840);
             SuspendLayout();
 
             titleLabel = new Label { AutoSize = true, Text = "Virtual Right Stick Drift V8", Font = new Font(Font.FontFamily, 13, FontStyle.Bold), Margin = new Padding(0, 0, 20, 0) };
@@ -208,7 +209,7 @@ namespace VigemStickDriftUi
 
             var contentLayout = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(18), ColumnCount = 3, RowCount = 3 };
             contentLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 250)); contentLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 340)); contentLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-            contentLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 46)); contentLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 38)); contentLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 82));
+            contentLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 43)); contentLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 36)); contentLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 172));
 
             contentLayout.Controls.Add(driftBox, 0, 0); contentLayout.SetRowSpan(driftBox, 3);
             contentLayout.Controls.Add(jitterBox, 1, 0);
@@ -268,7 +269,6 @@ namespace VigemStickDriftUi
             try
             {
                 controllerManager.Connect(controllerTypeBox.SelectedItem?.ToString());
-                isConnected = true;
                 connectButton.Enabled = false;
                 disconnectButton.Enabled = true;
                 controllerTypeBox.Enabled = false;
@@ -371,12 +371,23 @@ namespace VigemStickDriftUi
                 string keyName = NormalizeKeyName(e.Key);
                 inputBindingManager.SetKeyState(keyName, e.IsDown);
 
-                // Never disengage when the pressed key is the configured jitter trigger —
-                // that would fight the jitter activation on every hold.
+                // ESC toggles the controller connection on/off
+                if (e.Key == Keys.Escape && e.IsDown)
+                {
+                    if (InvokeRequired) Invoke(ToggleControllerConnection);
+                    else ToggleControllerConnection();
+                    return;
+                }
+
+                // Track weapon number key press/release for live status indicators
+                UpdateWeaponKeyPressedState(e.Key, e.IsDown);
+
+                // Disable keys (Tab, E, F, Q, R, Shift…) cause a timed disengage — but
+                // never when: (a) controller isn't connected, (b) the key is also the jitter trigger.
                 string jitterKey = jitterHoldKeyBox.SelectedItem?.ToString() ?? "None";
                 bool isJitterTrigger = string.Equals(keyName, jitterKey, StringComparison.OrdinalIgnoreCase);
 
-                if (e.IsDown && !isJitterTrigger && IsDisableKeySelected(e.Key))
+                if (e.IsDown && controllerManager.IsConnected && !isJitterTrigger && IsDisableKeySelected(e.Key))
                     EngageTemporaryDisengage($"key {keyName}");
 
                 if (e.IsDown) CheckWeaponSlotKey(e.Key);
@@ -419,7 +430,6 @@ namespace VigemStickDriftUi
             jitterEngine.Reset();
             inputBindingManager.Clear();
 
-            isConnected = false;
             isTemporarilyDisengaged = false;
             disengagedUntilUtc = null;
 
@@ -427,6 +437,7 @@ namespace VigemStickDriftUi
             connectButton.Enabled = true;
             disconnectButton.Enabled = false;
             statusLabel.Text = "Status: Not connected";
+            UpdateAllKeySlotStatuses();
         }
 
         private void DriftSlider_Scroll(object sender, EventArgs e) => valueLabel.Text = $"Upward drift: {driftSlider.Value}%";
@@ -529,15 +540,31 @@ namespace VigemStickDriftUi
             patternComboBox.Items.Clear();
             patternComboBox.Items.AddRange(files);
             if (_weaponPatternBoxes == null) return;
-            foreach (var combo in _weaponPatternBoxes)
+            for (int i = 0; i < _weaponPatternBoxes.Length; i++)
             {
-                string selected = combo.SelectedItem?.ToString();
+                var combo = _weaponPatternBoxes[i];
+                string previous = combo.SelectedItem?.ToString();
                 combo.Items.Clear();
                 combo.Items.Add("(none)");
                 foreach (string f in files) combo.Items.Add(f);
-                combo.SelectedItem = selected;
-                if (combo.SelectedIndex < 0) combo.SelectedIndex = 0;
+
+                // Restore previous selection if it still exists
+                if (!string.IsNullOrEmpty(previous) && combo.Items.Contains(previous))
+                {
+                    combo.SelectedItem = previous;
+                }
+                else
+                {
+                    // Auto-assign patternN.txt where N matches the configured key
+                    string configKey = _weaponKeyBoxes?[i].SelectedItem?.ToString() ?? "(none)";
+                    string auto = configKey != "(none)" ? $"pattern{configKey}" : null;
+                    if (auto != null && combo.Items.Contains(auto))
+                        combo.SelectedItem = auto;
+                    else
+                        combo.SelectedIndex = 0;
+                }
             }
+            UpdateAllKeySlotStatuses();
         }
 
         private void SaveProfileButton_Click(object sender, EventArgs e)
@@ -637,57 +664,93 @@ namespace VigemStickDriftUi
 
         private GroupBox BuildWeaponSlotsBox()
         {
-            var box = new GroupBox { Dock = DockStyle.Fill, Text = "Weapon Slots — configure key + pattern, then press that key in-game", Padding = new Padding(10, 4, 10, 4) };
-            var flow = new FlowLayoutPanel { Dock = DockStyle.Fill, WrapContents = false, AutoScroll = true };
+            var box = new GroupBox
+            {
+                Dock = DockStyle.Fill,
+                Text = "Key Slots — maps each game key to a pattern file (press the key in-game to auto-switch)",
+                Padding = new Padding(8, 4, 8, 4)
+            };
 
-            // Header labels
-            flow.Controls.Add(new Label { Text = "Slot", AutoSize = true, Font = new Font(Font.FontFamily, 7.5f, FontStyle.Bold), Margin = new Padding(6, 10, 30, 0) });
-            flow.Controls.Add(new Label { Text = "Key", AutoSize = true, Font = new Font(Font.FontFamily, 7.5f, FontStyle.Bold), Margin = new Padding(0, 10, 68, 0) });
-            flow.Controls.Add(new Label { Text = "Pattern file  (none = holster, disables jitter)", AutoSize = true, Font = new Font(Font.FontFamily, 7.5f, FontStyle.Bold), Margin = new Padding(0, 10, 0, 0) });
+            var scroll = new Panel { Dock = DockStyle.Fill, AutoScroll = true };
+
+            var table = new TableLayoutPanel
+            {
+                AutoSize = true,
+                AutoSizeMode = AutoSizeMode.GrowAndShrink,
+                ColumnCount = 4,
+                RowCount = WeaponSlotCount + 1,
+                Padding = new Padding(0)
+            };
+            table.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 62));   // "Key N" label
+            table.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 66));   // key dropdown
+            table.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 162));  // pattern dropdown
+            table.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));   // status label
+
+            // Column headers
+            var hFont = new Font(Font.FontFamily, 7.5f, FontStyle.Bold);
+            table.Controls.Add(MakeHeaderLabel("Key Slot", hFont), 0, 0);
+            table.Controls.Add(MakeHeaderLabel("Key", hFont), 1, 0);
+            table.Controls.Add(MakeHeaderLabel("Pattern file  (none = holster)", hFont), 2, 0);
+            table.Controls.Add(MakeHeaderLabel("Status", hFont), 3, 0);
 
             _weaponKeyBoxes = new ComboBox[WeaponSlotCount];
             _weaponPatternBoxes = new ComboBox[WeaponSlotCount];
-            string[] keyChoices = { "(none)", "1", "2", "3", "4", "5", "6", "7", "8", "9" };
-            string[] defaultKeys = { "1", "2", "3", "4", "5" };
+            _keySlotStatusLabels = new Label[WeaponSlotCount];
+
+            // Key choices: (none), 1-9, 0  (matches typical game weapon keys)
+            string[] keyChoices = { "(none)", "1", "2", "3", "4", "5", "6", "7", "8", "9", "0" };
+            string[] defaultKeys = { "1", "2", "3", "4", "5", "6", "7", "8", "9", "0" };
 
             for (int i = 0; i < WeaponSlotCount; i++)
             {
-                flow.Controls.Add(new Label { Text = $"Slot {i + 1}", AutoSize = true, Margin = new Padding(6, 8, 12, 0) });
+                int row = i + 1;
 
-                var keyCombo = new ComboBox { Width = 58, DropDownStyle = ComboBoxStyle.DropDownList, Margin = new Padding(0, 4, 12, 0) };
+                table.Controls.Add(
+                    new Label { Text = $"Key {i + 1}", AutoSize = true, Margin = new Padding(2, 7, 2, 2) }, 0, row);
+
+                var keyCombo = new ComboBox { Width = 58, DropDownStyle = ComboBoxStyle.DropDownList, Margin = new Padding(2, 3, 2, 2) };
                 foreach (string k in keyChoices) keyCombo.Items.Add(k);
-                keyCombo.SelectedItem = i < defaultKeys.Length ? defaultKeys[i] : "(none)";
+                keyCombo.SelectedItem = defaultKeys[i];
+                keyCombo.SelectedIndexChanged += (s, e) => UpdateAllKeySlotStatuses();
                 _weaponKeyBoxes[i] = keyCombo;
-                flow.Controls.Add(keyCombo);
+                table.Controls.Add(keyCombo, 1, row);
 
-                var patternCombo = new ComboBox { Width = 150, DropDownStyle = ComboBoxStyle.DropDownList, Margin = new Padding(0, 4, 28, 0) };
-                patternCombo.Items.Add("(none)");
-                patternCombo.SelectedIndex = 0;
-                _weaponPatternBoxes[i] = patternCombo;
-                flow.Controls.Add(patternCombo);
+                var patCombo = new ComboBox { Width = 156, DropDownStyle = ComboBoxStyle.DropDownList, Margin = new Padding(2, 3, 2, 2) };
+                patCombo.Items.Add("(none)");
+                patCombo.SelectedIndex = 0;
+                patCombo.SelectedIndexChanged += (s, e) => UpdateAllKeySlotStatuses();
+                _weaponPatternBoxes[i] = patCombo;
+                table.Controls.Add(patCombo, 2, row);
+
+                var statusLbl = new Label { AutoSize = true, Text = "○ ready", ForeColor = Color.DimGray, Margin = new Padding(6, 7, 2, 2) };
+                _keySlotStatusLabels[i] = statusLbl;
+                table.Controls.Add(statusLbl, 3, row);
             }
 
-            box.Controls.Add(flow);
+            scroll.Controls.Add(table);
+            box.Controls.Add(scroll);
             return box;
         }
 
-        // Called on every key-down. Converts the raw key to its number string ("1"–"9")
-        // then scans all slots to find which one has that key configured.
+        private static Label MakeHeaderLabel(string text, Font font) =>
+            new Label { Text = text, Font = font, AutoSize = true, Margin = new Padding(2, 4, 2, 4) };
+
+        // Converts a raw key to its number string, updates pressed-state tracking, and triggers
+        // the live status label refresh for all slots.
+        private void UpdateWeaponKeyPressedState(Keys key, bool isDown)
+        {
+            string str = KeyToNumberString(key);
+            if (str == null) return;
+            if (isDown) _pressedWeaponKeys.Add(str);
+            else _pressedWeaponKeys.Remove(str);
+            if (InvokeRequired) Invoke(UpdateAllKeySlotStatuses);
+            else UpdateAllKeySlotStatuses();
+        }
+
+        // Called on every key-down: find the first slot whose configured key matches, apply it.
         private void CheckWeaponSlotKey(Keys key)
         {
-            string pressedStr = key switch
-            {
-                Keys.D1 or Keys.NumPad1 => "1",
-                Keys.D2 or Keys.NumPad2 => "2",
-                Keys.D3 or Keys.NumPad3 => "3",
-                Keys.D4 or Keys.NumPad4 => "4",
-                Keys.D5 or Keys.NumPad5 => "5",
-                Keys.D6 or Keys.NumPad6 => "6",
-                Keys.D7 or Keys.NumPad7 => "7",
-                Keys.D8 or Keys.NumPad8 => "8",
-                Keys.D9 or Keys.NumPad9 => "9",
-                _ => null
-            };
+            string pressedStr = KeyToNumberString(key);
             if (pressedStr == null) return;
             if (InvokeRequired) Invoke(() => MatchAndApplyWeaponSlot(pressedStr));
             else MatchAndApplyWeaponSlot(pressedStr);
@@ -695,6 +758,9 @@ namespace VigemStickDriftUi
 
         private void MatchAndApplyWeaponSlot(string pressedStr)
         {
+            // While disconnected, don't switch patterns — but still allow UI interaction.
+            if (!controllerManager.IsConnected) return;
+
             for (int i = 0; i < _weaponKeyBoxes.Length; i++)
             {
                 if (string.Equals(_weaponKeyBoxes[i].SelectedItem?.ToString(), pressedStr, StringComparison.Ordinal))
@@ -711,24 +777,110 @@ namespace VigemStickDriftUi
             _currentWeaponSlot = slot;
             string patternFileName = _weaponPatternBoxes[slot - 1].SelectedItem?.ToString();
 
-            // "(none)" means holster — turn off jitter entirely
+            // (none) = holster — turn jitter off
             if (string.IsNullOrEmpty(patternFileName) || patternFileName == "(none)")
             {
                 jitterPatternBox.SelectedItem = "Off";
-                statusLabel.Text = $"Slot {slot} selected: holster — jitter disabled";
+                UpdateAllKeySlotStatuses();
+                statusLabel.Text = $"Key {slot}: holster — jitter disabled";
                 return;
             }
 
             string filePath = Path.Combine(patternsDirectory, patternFileName + ".txt");
             if (!File.Exists(filePath))
             {
-                statusLabel.Text = $"Slot {slot}: file not found — {patternFileName}.txt";
+                UpdateAllKeySlotStatuses();
+                statusLabel.Text = $"Key {slot}: ⚠ file not found — {patternFileName}.txt";
                 return;
             }
 
-            LoadPatternFromFile(filePath);   // loads points + sets jitterPatternBox to "Custom"
-            statusLabel.Text = $"Slot {slot} ({patternFileName}) loaded — {customPatternPoints.Count} steps";
+            LoadPatternFromFile(filePath);   // sets Custom mode + syncs preview
+            UpdateAllKeySlotStatuses();
+            statusLabel.Text = $"Key {slot} active: {patternFileName} ({customPatternPoints.Count} steps)";
         }
+
+        // Refreshes every slot's status label based on current active slot, pressed keys, and file existence.
+        private void UpdateAllKeySlotStatuses()
+        {
+            if (_keySlotStatusLabels == null) return;
+            bool connected = controllerManager.IsConnected;
+            for (int i = 0; i < _keySlotStatusLabels.Length; i++)
+            {
+                var lbl = _keySlotStatusLabels[i];
+                string configKey = _weaponKeyBoxes?[i].SelectedItem?.ToString() ?? "(none)";
+                string patternFile = _weaponPatternBoxes?[i].SelectedItem?.ToString() ?? "(none)";
+                bool isActive = _currentWeaponSlot == i + 1;
+                bool isHeld = configKey != "(none)" && _pressedWeaponKeys.Contains(configKey);
+                bool isHolster = patternFile == "(none)";
+                bool fileExists = !isHolster && File.Exists(Path.Combine(patternsDirectory, patternFile + ".txt"));
+
+                if (!connected)
+                {
+                    lbl.Text = "— offline";
+                    lbl.ForeColor = Color.Gray;
+                }
+                else if (isHolster)
+                {
+                    lbl.Text = isActive ? "■ holster" : "— holster";
+                    lbl.ForeColor = isActive ? Color.DimGray : Color.Gray;
+                }
+                else if (!fileExists)
+                {
+                    lbl.Text = "⚠ no file";
+                    lbl.ForeColor = Color.OrangeRed;
+                }
+                else if (isActive && isHeld)
+                {
+                    lbl.Text = "● ACTIVE  KEY HELD";
+                    lbl.ForeColor = Color.LimeGreen;
+                }
+                else if (isActive)
+                {
+                    lbl.Text = "● ACTIVE";
+                    lbl.ForeColor = Color.Green;
+                }
+                else if (isHeld)
+                {
+                    lbl.Text = "↑ key held";
+                    lbl.ForeColor = Color.DodgerBlue;
+                }
+                else
+                {
+                    lbl.Text = "○ ready";
+                    lbl.ForeColor = Color.DimGray;
+                }
+            }
+        }
+
+        // ESC press: toggle controller on/off so users can pause everything with one key.
+        private void ToggleControllerConnection()
+        {
+            if (controllerManager.IsConnected)
+            {
+                CleanupController();
+                statusLabel.Text = "ESC: controller disconnected — press ESC to reconnect";
+            }
+            else if (connectButton.Enabled)
+            {
+                ConnectButton_Click(this, EventArgs.Empty);
+            }
+        }
+
+        // Converts D1-D9/D0 and NumPad equivalents to the string "1"-"9"/"0".
+        private static string KeyToNumberString(Keys key) => key switch
+        {
+            Keys.D1 or Keys.NumPad1 => "1",
+            Keys.D2 or Keys.NumPad2 => "2",
+            Keys.D3 or Keys.NumPad3 => "3",
+            Keys.D4 or Keys.NumPad4 => "4",
+            Keys.D5 or Keys.NumPad5 => "5",
+            Keys.D6 or Keys.NumPad6 => "6",
+            Keys.D7 or Keys.NumPad7 => "7",
+            Keys.D8 or Keys.NumPad8 => "8",
+            Keys.D9 or Keys.NumPad9 => "9",
+            Keys.D0 or Keys.NumPad0 => "0",
+            _ => null
+        };
 
         private static string NormalizeKeyName(Keys key) => key switch { Keys.LShiftKey or Keys.RShiftKey or Keys.ShiftKey => "Shift", Keys.LControlKey or Keys.RControlKey or Keys.ControlKey => "Ctrl", Keys.LMenu or Keys.RMenu or Keys.Menu => "Alt", Keys.Space => "Space", Keys.Return => "Enter", Keys.Escape => "Escape", _ => key.ToString() };
         private void MainForm_FormClosing(object sender, FormClosingEventArgs e) { try { inputHook?.Dispose(); } catch { } CleanupController(); }
